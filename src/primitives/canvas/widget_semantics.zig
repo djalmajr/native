@@ -75,6 +75,7 @@ pub fn collectWidgetSemantics(layout: anytype, output: []WidgetSemanticsNode, sc
             .id = node.widget.id,
             .role = role,
             .label = semanticLabel(node.widget),
+            .raw_key_chords = negotiatesKeyProtocols(node.widget),
             .value = scroll.value orelse semanticValue(node.widget),
             .text_value = semanticTextValue(node.widget),
             .placeholder = semanticPlaceholder(node.widget),
@@ -111,6 +112,15 @@ fn nearestSemanticParent(stack: []const ?usize) ?usize {
 /// The role a widget is exposed under: an explicit `semantics.role`, or
 /// the kind's default. Shared with the a11y audit (a11y_audit.zig), which
 /// must judge widgets by the role the bridges will actually announce.
+/// Whether the widget speaks key protocols itself and therefore needs the
+/// raw chord rather than the platform's composed text. Only the terminal
+/// does: macOS folds Option+a into U+00E5 before any emulator sees an alt
+/// chord, and a shell binding needs the alt fact, not the glyph. Every
+/// other widget keeps dead keys and IME composition.
+pub fn negotiatesKeyProtocols(widget: Widget) bool {
+    return widget.kind == .terminal;
+}
+
 pub fn semanticRole(widget: Widget) WidgetRole {
     if (widget.semantics.role != .none) return widget.semantics.role;
     return switch (widget.kind) {

@@ -377,6 +377,7 @@ const widget_state_read_only: u32 = 1 << 7;
 const widget_state_invalid: u32 = 1 << 8;
 const widget_state_can_undo: u32 = 1 << 9;
 const widget_state_can_redo: u32 = 1 << 10;
+const widget_state_raw_key_chords: u32 = 1 << 11;
 const widget_action_focus: u32 = 1 << 0;
 const widget_action_press: u32 = 1 << 1;
 const widget_action_toggle: u32 = 1 << 2;
@@ -1921,6 +1922,7 @@ fn widgetStateFlags(node: platform_mod.WidgetAccessibilityNode) u32 {
     if (node.invalid) flags |= widget_state_invalid;
     if (node.can_undo) flags |= widget_state_can_undo;
     if (node.can_redo) flags |= widget_state_can_redo;
+    if (node.raw_key_chords) flags |= widget_state_raw_key_chords;
     return flags;
 }
 

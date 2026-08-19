@@ -61,6 +61,7 @@ static NSString *NativeSdkOriginForURL(NSURL *url);
 static BOOL NativeSdkPolicyListMatches(NSArray<NSString *> *values, NSURL *url);
 static NSString *NativeSdkShortcutKeyForEvent(NSEvent *event);
 static BOOL NativeSdkTextNavigationNeedsRawKeyEvent(NSEvent *event);
+static BOOL NativeSdkRawKeyChordEvent(NSEvent *event);
 static BOOL NativeSdkShortcutUsesImplicitShift(NSString *key, NSEvent *event);
 static BOOL NativeSdkShortcutModifiersMatch(uint32_t shortcutModifiers, NSEventModifierFlags eventModifiers, BOOL allowImplicitShift);
 static NSEventModifierFlags NativeSdkMenuModifierFlags(uint32_t modifiers);
@@ -407,6 +408,9 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 @property(nonatomic, assign) uint32_t actionFlags;
 @property(nonatomic, assign) BOOL canUndo;
 @property(nonatomic, assign) BOOL canRedo;
+// The widget negotiates key protocols itself (a terminal): keyDown: must
+// hand it the raw chord instead of letting interpretKeyEvents compose it.
+@property(nonatomic, assign) BOOL rawKeyChords;
 - (BOOL)emitSetTextAccessibilityValue:(id)value;
 - (BOOL)emitSetSelectionAccessibilityValue:(id)value;
 @end
@@ -5590,6 +5594,7 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
         element.accessibilitySelected = (node.state_flags & NATIVE_SDK_APPKIT_WIDGET_STATE_SELECTED) != 0;
         element.canUndo = (node.state_flags & NATIVE_SDK_APPKIT_WIDGET_STATE_CAN_UNDO) != 0;
         element.canRedo = (node.state_flags & NATIVE_SDK_APPKIT_WIDGET_STATE_CAN_REDO) != 0;
+        element.rawKeyChords = (node.state_flags & NATIVE_SDK_APPKIT_WIDGET_STATE_RAW_KEY_CHORDS) != 0;
         if ((node.state_flags & NATIVE_SDK_APPKIT_WIDGET_STATE_EXPANDED) != 0) {
             element.accessibilityExpanded = YES;
         } else if ((node.state_flags & NATIVE_SDK_APPKIT_WIDGET_STATE_COLLAPSED) != 0) {
@@ -6330,6 +6335,16 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
         // translates the natural macOS gestures to shell bindings, and
         // negotiated key protocols must see every other combined chord.
         if (NativeSdkTextNavigationNeedsRawKeyEvent(event)) {
+            [self emitInputEventWithKind:NATIVE_SDK_APPKIT_GPU_INPUT_KEY_DOWN event:event button:0 deltaX:0 deltaY:0];
+            return;
+        }
+        // The comment above promised the terminal every combined chord;
+        // this is the branch that keeps it. Gated on the focused node's
+        // own RAW_KEY_CHORDS bit, so a `<text-field>` is untouched.
+        NSAccessibilityElement *focusedForChords = [self focusedTextAccessibilityElement];
+        if ([focusedForChords isKindOfClass:[NativeSdkWidgetAccessibilityElement class]] &&
+            ((NativeSdkWidgetAccessibilityElement *)focusedForChords).rawKeyChords &&
+            NativeSdkRawKeyChordEvent(event)) {
             [self emitInputEventWithKind:NATIVE_SDK_APPKIT_GPU_INPUT_KEY_DOWN event:event button:0 deltaX:0 deltaY:0];
             return;
         }
@@ -11551,6 +11566,22 @@ static BOOL NativeSdkTextNavigationNeedsRawKeyEvent(NSEvent *event) {
     if ((flags & (NSEventModifierFlagCommand | NSEventModifierFlagOption)) == 0) return NO;
     NSString *key = NativeSdkShortcutKeyForEvent(event);
     return [key isEqualToString:@"arrowleft"] || [key isEqualToString:@"arrowright"];
+}
+
+// A widget that negotiates key protocols (a terminal) must see the chord
+// itself. `interpretKeyEvents:` would run macOS's unicode translation
+// first and deliver U+00E5 for Option+a, which is the right answer for a
+// text field and the wrong one for a shell binding — by then the alt fact
+// is gone and no encoder can recover it.
+//
+// Option and Control only. Command stays on the interpreted path so menu
+// equivalents and the app's own shortcuts keep working, and a bare key
+// keeps composing: dead keys and IME must not change for anyone.
+static BOOL NativeSdkRawKeyChordEvent(NSEvent *event) {
+    if (!event) return NO;
+    NSEventModifierFlags flags = event.modifierFlags & NSEventModifierFlagDeviceIndependentFlagsMask;
+    if ((flags & NSEventModifierFlagCommand) != 0) return NO;
+    return (flags & (NSEventModifierFlagOption | NSEventModifierFlagControl)) != 0;
 }
 
 static BOOL NativeSdkShortcutUsesImplicitShift(NSString *key, NSEvent *event) {

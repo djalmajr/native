@@ -2160,6 +2160,13 @@ pub const WidgetAccessibilityNode = struct {
     invalid: bool = false,
     can_undo: bool = false,
     can_redo: bool = false,
+    /// The widget negotiates key protocols itself, so the host must hand
+    /// it the raw chord instead of letting the platform's text input
+    /// compose it. A terminal needs this: macOS turns Option+a into
+    /// U+00E5 before the emulator ever sees an alt chord, which is the
+    /// wrong answer for a shell binding. Off by default, so every other
+    /// widget keeps dead keys and IME composition.
+    raw_key_chords: bool = false,
     focusable: bool = false,
     actions: WidgetAccessibilityActions = .{},
 };

@@ -1049,7 +1049,16 @@ const Session = if (enabled) struct {
         };
         var buffer: [128]u8 = undefined;
         var writer: std.Io.Writer = .fixed(&buffer);
-        const encode_options: vt.input.KeyEncodeOptions = .fromTerminal(&session.term);
+        var encode_options: vt.input.KeyEncodeOptions = .fromTerminal(&session.term);
+        // `fromTerminal` documents this one as unknowable from terminal
+        // state and leaves it `.false`, which makes `legacyAltPrefix`
+        // refuse every macOS Option chord. A terminal surface wants
+        // Option to mean Meta, so the ESC prefix is what a shell binding
+        // expects; the host only delivers these raw for a focused
+        // terminal, so nothing else changes.
+        if (comptime builtin.os.tag == .macos) {
+            encode_options.macos_option_as_alt = .true;
+        }
         // The runtime folds the platform's PRIMARY modifier into
         // `super`. On macOS primary IS the GUI key, so the fold is
         // harmless — but on hosts whose primary is Ctrl, a bare Ctrl
@@ -1190,7 +1199,11 @@ const Session = if (enabled) struct {
         // sequence. Alt is a chord EXCEPT on macOS (Option composes
         // text); Ctrl+Alt together on Windows is AltGr and composes.
         const altgr = event.modifiers.control and event.modifiers.alt and builtin.os.tag == .windows;
-        const alt_is_chord = event.modifiers.alt and builtin.os.tag != .macos;
+        // macOS used to be excluded here because Option composes text —
+        // but the host now hands a focused terminal the raw chord, so the
+        // alt fact survives and the encoder is the right place to decide.
+        // Without this the branch below drops Option chords entirely.
+        const alt_is_chord = event.modifiers.alt;
         const chorded = (event.modifiers.control or event.modifiers.super or alt_is_chord) and !altgr;
         if (!chorded) return null;
         if (key.len == 1) {

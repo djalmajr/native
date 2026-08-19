@@ -470,6 +470,11 @@ pub const WidgetSemanticsNode = struct {
     bounds: geometry.RectF,
     state: WidgetState,
     focusable: bool = false,
+    /// The widget negotiates key protocols itself, so the host must not
+    /// let the platform's text input compose its chords. The role cannot
+    /// carry this: a terminal announces as `.textbox`, exactly like the
+    /// text fields that DO want composition.
+    raw_key_chords: bool = false,
     actions: WidgetActions = .{},
     text_selection: ?TextRange = null,
     text_composition: ?TextRange = null,

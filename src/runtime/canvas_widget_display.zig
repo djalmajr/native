@@ -254,6 +254,7 @@ pub fn RuntimeCanvasWidgetDisplay(comptime Runtime: type) type {
                     .invalid = node.state.invalid,
                     .can_undo = history.can_undo,
                     .can_redo = history.can_redo,
+                    .raw_key_chords = node.raw_key_chords,
                     .focusable = node.focusable,
                     .actions = platformWidgetAccessibilityActions(node.actions),
                 };
@@ -608,6 +609,7 @@ fn hashWidgetAccessibilityNodes(nodes: []const platform.WidgetAccessibilityNode)
         hashAccessibilityValue(&hasher, node.invalid);
         hashAccessibilityValue(&hasher, node.can_undo);
         hashAccessibilityValue(&hasher, node.can_redo);
+        hashAccessibilityValue(&hasher, node.raw_key_chords);
         hashAccessibilityValue(&hasher, node.focusable);
         inline for (comptime std.meta.fieldNames(platform.WidgetAccessibilityActions)) |field_name| {
             hashAccessibilityValue(&hasher, @field(node.actions, field_name));
