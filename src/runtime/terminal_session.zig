@@ -65,6 +65,15 @@ pub const PointerSelectionEvent = struct {
     width: f32,
     height: f32,
     click_count: u8 = 1,
+    /// Platform button number (0 = primary). Mouse reporting needs the
+    /// button; selection only ever cared about the primary one.
+    button: i32 = 0,
+    /// Modifiers held for this event. Shift is special: it forces local
+    /// selection even while the child is reporting, which is how every
+    /// terminal lets you copy out of a mouse-driven TUI.
+    modifiers: canvas.WidgetKeyboardModifiers = .{},
+    /// Wheel steps for `.wheel`, positive scrolling the content down.
+    wheel_steps: i32 = 0,
 };
 
 pub const PointerSelectionResult = struct {
@@ -412,6 +421,13 @@ const EnabledStore = struct {
     /// supplies only the gesture and the content-box geometry.
     pub fn pointerSelection(self: *EnabledStore, pty: u64, event: PointerSelectionEvent) PointerSelectionResult {
         const session = self.find(pty) orelse return .{};
+        // Mouse reporting wins over local selection while the child asked
+        // for it — that is what makes vim and tmux usable — EXCEPT with
+        // shift held, the universal terminal escape hatch for copying out
+        // of a mouse-driven TUI.
+        if (!event.modifiers.shift and session.reportMouse(self.gateway, pty, event)) {
+            return .{};
+        }
         const result = session.pointerSelection(event);
         if (result.changed) session.snapshot_dirty = true;
         return result;
@@ -538,6 +554,19 @@ const Session = if (enabled) struct {
     /// emitting. That keeps a later enable from replaying stale history
     /// and a redundant callback from writing a duplicate report.
     focus_reported: bool = false,
+
+    /// Last reported cell, for the encoder's motion deduplication: a
+    /// drag inside one cell must not spam the child.
+    mouse_last_cell: ?vt.Coordinate = null,
+    /// Buttons currently held, so the encoder knows whether a motion
+    /// outside the viewport is a drag worth reporting.
+    mouse_buttons_down: u8 = 0,
+    /// Which button is held, for motion reports. The platform leaves
+    /// `button` at 0 on motion, so a hover would otherwise encode as a
+    /// LEFT drag: tmux reads that as a gesture in progress and swallows
+    /// the click that follows. Motion with nothing held must carry no
+    /// button at all.
+    mouse_button_held: ?vt.input.MouseButton = null,
 
     /// Pending outbound bytes toward the child's stdin — typed keys,
     /// IME commits, AND emulator query replies, one stream-ordered ring
@@ -777,6 +806,113 @@ const Session = if (enabled) struct {
     /// counts as dropped instead of silent loss. Stdin order comes
     /// first: a query reply retained behind a full ring is OLDER than
     /// this keystroke and must reach the child before it.
+    /// Encode a pointer event as a mouse report when the child enabled
+    /// one of the mouse modes. Returns whether the event was consumed as
+    /// a report; false leaves it to local selection.
+    ///
+    /// The VT owns the hard parts — which events a mode reports, the
+    /// viewport clamp, motion deduplication and the wire format — so this
+    /// only normalizes the platform event and keeps the state the encoder
+    /// asks for (held buttons, last cell).
+    fn reportMouse(
+        session: *Session,
+        gateway: ?PtyGateway,
+        key: u64,
+        event: PointerSelectionEvent,
+    ) bool {
+        if (session.term.flags.mouse_event == .none) return false;
+        if (session.cell_width <= 0 or session.cell_height <= 0) return false;
+
+        const button: ?vt.input.MouseButton = switch (event.button) {
+            0 => .left,
+            1 => .right,
+            2 => .middle,
+            else => null,
+        };
+        const action: vt.input.MouseAction = switch (event.phase) {
+            .down => .press,
+            .up => .release,
+            .move, .hover => .motion,
+            // A cancelled gesture is a release as far as the child is
+            // concerned: leaving a button stuck down would wedge a TUI.
+            .cancel => .release,
+            .wheel => .press,
+        };
+
+        // Wheel is buttons 64/65 in every mouse protocol, and it reports
+        // one press per step so a TUI scrolls by the same amount a local
+        // scrollback would.
+        var wheel_button: ?vt.input.MouseButton = null;
+        if (event.phase == .wheel) {
+            if (event.wheel_steps == 0) return false;
+            wheel_button = if (event.wheel_steps > 0) .five else .four;
+        }
+
+        switch (event.phase) {
+            .down => {
+                session.mouse_buttons_down +|= 1;
+                session.mouse_button_held = button;
+            },
+            .up, .cancel => {
+                session.mouse_buttons_down -|= 1;
+                if (session.mouse_buttons_down == 0) session.mouse_button_held = null;
+            },
+            else => {},
+        }
+
+        var last_cell = session.mouse_last_cell;
+        var options: vt.input.MouseEncodeOptions = .{
+            .event = session.term.flags.mouse_event,
+            .format = session.term.flags.mouse_format,
+            .size = .{
+                .screen = .{
+                    .width = @intFromFloat(@max(0, event.width)),
+                    .height = @intFromFloat(@max(0, event.height)),
+                },
+                .cell = .{
+                    .width = @intFromFloat(@max(1, @round(session.cell_width))),
+                    .height = @intFromFloat(@max(1, @round(session.cell_height))),
+                },
+                .padding = .{},
+            },
+            .any_button_pressed = session.mouse_buttons_down > 0,
+            .last_cell = &last_cell,
+        };
+
+        var buffer: [32]u8 = undefined;
+        var writer: std.Io.Writer = .fixed(&buffer);
+        // A motion carries the HELD button, or none at all — never the
+        // platform's default 0, which would read as a left drag.
+        const report_button: ?vt.input.MouseButton = if (wheel_button) |w|
+            w
+        else if (action == .motion)
+            session.mouse_button_held
+        else
+            button;
+
+        vt.input.encodeMouse(&writer, .{
+            .action = action,
+            .button = report_button,
+            .mods = .{
+                .shift = event.modifiers.shift,
+                .ctrl = event.modifiers.control,
+                .alt = event.modifiers.alt,
+                .super = event.modifiers.super,
+            },
+            .pos = .{ .x = event.x, .y = event.y },
+        }, options) catch return false;
+        session.mouse_last_cell = last_cell;
+        _ = &options;
+
+        const encoded = writer.buffered();
+        // The mode is on, so the event belongs to the child even when it
+        // encodes to nothing (a deduplicated motion): falling through to
+        // selection would paint a drag the child is already tracking.
+        if (encoded.len == 0) return true;
+        session.enqueueTransient(gateway, key, encoded);
+        return true;
+    }
+
     fn enqueueTransient(session: *Session, gateway: ?PtyGateway, key: u64, bytes: []const u8) void {
         session.moveResponsesToOutbound(gateway, key);
         if (session.response_len > 0) {

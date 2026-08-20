@@ -4529,11 +4529,14 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// release-time `on_press`.
         fn handleTerminalPointer(self: *Self, runtime: *Runtime, pointer_event: core.CanvasWidgetPointerEvent) anyerror!bool {
             if (comptime !terminal_session.enabled) return false;
+            // Every phase reaches the store now: mouse reporting needs
+            // hover (motion without a button, for `any` tracking) and
+            // wheel (buttons 64/65), and it needs the non-primary buttons
+            // that selection never cared about. The store decides — it
+            // falls back to selection whenever the child is not reporting.
             switch (pointer_event.pointer.phase) {
-                .down, .move, .up, .cancel => {},
-                .hover, .wheel => return false,
+                .down, .move, .up, .cancel, .hover, .wheel => {},
             }
-            if (pointer_event.pointer.phase == .down and pointer_event.pointer.button != 0) return false;
             const target = pointer_event.target orelse return false;
             const layout = runtime.canvasWidgetLayout(pointer_event.window_id, pointer_event.view_label) catch return false;
             var terminal_node: ?canvas.WidgetLayoutNode = null;
@@ -4564,6 +4567,9 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 .width = content.width,
                 .height = content.height,
                 .click_count = pointer_event.pointer.click_count,
+                .button = pointer_event.pointer.button,
+                .modifiers = pointer_event.pointer.modifiers,
+                .wheel_steps = @intFromFloat(pointer_event.pointer.delta.dy),
             });
             if (result.changed) try self.repaintTerminals(runtime, pointer_event.window_id);
             return pointer_event.pointer.phase == .up and result.selection_active;

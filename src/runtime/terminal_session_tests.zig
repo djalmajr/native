@@ -494,3 +494,88 @@ test "focus reporting emits CSI I / CSI O only with mode 1004 and only on transi
     // An unknown pty is a no-op, not a crash.
     store.focusChanged(999, true);
 }
+
+test "mouse reporting encodes clicks under SGR and yields to shift for selection" {
+    if (comptime !terminal_session.enabled) return error.SkipZigTest;
+    var store = TerminalSessions.init(testing.allocator);
+    defer store.deinit();
+    var gw = TestGateway{ .gpa = testing.allocator };
+    defer gw.deinit();
+    store.setGateway(gw.gateway());
+    store.beginBuild(.{});
+    _ = resolveGrid(&store, 11) orelse return error.TestExpectedGrid;
+    _ = store.reconcile(11, 0, 80, 24);
+
+    const box: struct { w: f32, h: f32 } = .{ .w = 640, .h = 432 };
+
+    // Mode off: the pointer belongs to local selection, not the child.
+    _ = store.pointerSelection(11, .{
+        .phase = .down, .x = 0, .y = 0, .width = box.w, .height = box.h,
+    });
+    try testing.expectEqualStrings("", gw.written.items);
+
+    // SGR (1006) with button tracking (1002).
+    feedOutput(&store, 11, "\x1b[?1002h\x1b[?1006h");
+    gw.written.clearRetainingCapacity();
+
+    // Cell (0,0) is button 0 at column 1, row 1 — SGR is 1-based.
+    _ = store.pointerSelection(11, .{
+        .phase = .down, .x = 1, .y = 1, .width = box.w, .height = box.h,
+    });
+    try testing.expectEqualStrings("\x1b[<0;1;1M", gw.written.items);
+    gw.written.clearRetainingCapacity();
+
+    _ = store.pointerSelection(11, .{
+        .phase = .up, .x = 1, .y = 1, .width = box.w, .height = box.h,
+    });
+    try testing.expectEqualStrings("\x1b[<0;1;1m", gw.written.items);
+    gw.written.clearRetainingCapacity();
+
+    // Shift is the escape hatch: it must reach selection, never the child.
+    const shifted = store.pointerSelection(11, .{
+        .phase = .down, .x = 1, .y = 1, .width = box.w, .height = box.h,
+        .modifiers = .{ .shift = true },
+    });
+    try testing.expectEqualStrings("", gw.written.items);
+    _ = shifted;
+
+    // The right button reports as button 2, which selection never carried.
+    _ = store.pointerSelection(11, .{
+        .phase = .down, .x = 1, .y = 1, .width = box.w, .height = box.h, .button = 1,
+    });
+    try testing.expectEqualStrings("\x1b[<2;1;1M", gw.written.items);
+    gw.written.clearRetainingCapacity();
+    _ = store.pointerSelection(11, .{
+        .phase = .up, .x = 1, .y = 1, .width = box.w, .height = box.h, .button = 1,
+    });
+    gw.written.clearRetainingCapacity();
+
+    // Button tracking (1002) reports motion only while a button is down,
+    // so a bare hover encodes to nothing at all.
+    _ = store.pointerSelection(11, .{
+        .phase = .hover, .x = 100, .y = 40, .width = box.w, .height = box.h,
+    });
+    try testing.expectEqualStrings("", gw.written.items);
+
+    // Under any-motion (1003) the same hover reports, and it must carry
+    // NO button (SGR 35) rather than the platform's default 0. Encoding
+    // it as a left drag makes tmux read a gesture in progress and swallow
+    // the click that follows — observed against real tmux.
+    feedOutput(&store, 11, "\x1b[?1003h");
+    gw.written.clearRetainingCapacity();
+    _ = store.pointerSelection(11, .{
+        .phase = .hover, .x = 140, .y = 80, .width = box.w, .height = box.h,
+    });
+    try testing.expect(std.mem.startsWith(u8, gw.written.items, "\x1b[<35;"));
+    gw.written.clearRetainingCapacity();
+
+    // With the left button down, the same motion is a drag (32).
+    _ = store.pointerSelection(11, .{
+        .phase = .down, .x = 100, .y = 40, .width = box.w, .height = box.h,
+    });
+    gw.written.clearRetainingCapacity();
+    _ = store.pointerSelection(11, .{
+        .phase = .move, .x = 140, .y = 80, .width = box.w, .height = box.h,
+    });
+    try testing.expect(std.mem.startsWith(u8, gw.written.items, "\x1b[<32;"));
+}
