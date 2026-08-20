@@ -118,6 +118,12 @@ const DisabledStore = struct {
         _ = text;
         return false;
     }
+    pub fn focusChanged(self: *DisabledStore, pty: u64, focused: bool) void {
+        _ = self;
+        _ = pty;
+        _ = focused;
+    }
+
     pub fn pasteInput(self: *DisabledStore, pty: u64, text: []const u8) bool {
         _ = self;
         _ = pty;
@@ -337,6 +343,22 @@ const EnabledStore = struct {
     /// newlines like xterm, and strip control bytes that could inject
     /// terminal commands. Returns whether a live session consumed the
     /// paste; an ended or unknown session declines without writing.
+    /// Report a focus transition to the child (mode 1004: CSI I / CSI O).
+    /// Idempotent and transition-only — the caller may hand this every
+    /// frame. Tracking is unconditional but emission is not: a change
+    /// while the mode is off is remembered, never replayed, which is the
+    /// behaviour xterm documents and every TUI expects.
+    pub fn focusChanged(self: *EnabledStore, pty: u64, focused: bool) void {
+        const session = self.find(pty) orelse return;
+        if (session.focus_reported == focused) return;
+        session.focus_reported = focused;
+        if (!session.term.modes.get(.focus_event)) return;
+        var buffer: [vt.input.max_focus_encode_size]u8 = undefined;
+        var writer: std.Io.Writer = .fixed(&buffer);
+        vt.input.encodeFocus(&writer, if (focused) .gained else .lost) catch return;
+        session.enqueueTransient(self.gateway, pty, writer.buffered());
+    }
+
     pub fn pasteInput(self: *EnabledStore, pty: u64, text: []const u8) bool {
         const session = self.find(pty) orelse return false;
         if (!session.acceptsInput()) return false;
@@ -509,6 +531,13 @@ const Session = if (enabled) struct {
     response_buffer: []u8 = &.{},
     response_len: usize = 0,
     responses_dropped: u32 = 0,
+
+    /// The focus state the child was last TOLD about, which is not the
+    /// same as the focus state: mode 1004 reports transitions, so a
+    /// change that happens while the mode is off updates this without
+    /// emitting. That keeps a later enable from replaying stale history
+    /// and a redundant callback from writing a duplicate report.
+    focus_reported: bool = false,
 
     /// Pending outbound bytes toward the child's stdin — typed keys,
     /// IME commits, AND emulator query replies, one stream-ordered ring

@@ -448,3 +448,49 @@ test "the wide-cell spacer extends its primary's background in the published sna
     try testing.expect(row.cells[1].bg != null);
     try testing.expectEqual(row.cells[0].bg.?.r, row.cells[1].bg.?.r);
 }
+
+test "focus reporting emits CSI I / CSI O only with mode 1004 and only on transitions" {
+    if (comptime !terminal_session.enabled) return error.SkipZigTest;
+    var store = TerminalSessions.init(testing.allocator);
+    defer store.deinit();
+    var gw = TestGateway{ .gpa = testing.allocator };
+    defer gw.deinit();
+    store.setGateway(gw.gateway());
+    store.beginBuild(.{});
+    _ = resolveGrid(&store, 7) orelse return error.TestExpectedGrid;
+
+    // Mode off: the transition is tracked but nothing reaches the child.
+    // A terminal that reported focus unasked would corrupt the input of
+    // every program that never enabled 1004.
+    store.focusChanged(7, true);
+    try testing.expectEqualStrings("", gw.written.items);
+
+    feedOutput(&store, 7, "\x1b[?1004h");
+    gw.written.clearRetainingCapacity();
+
+    // Already focused as far as the child's state machine goes, so
+    // enabling the mode replays nothing — xterm reports transitions.
+    store.focusChanged(7, true);
+    try testing.expectEqualStrings("", gw.written.items);
+
+    store.focusChanged(7, false);
+    try testing.expectEqualStrings("\x1b[O", gw.written.items);
+    gw.written.clearRetainingCapacity();
+
+    // Idempotent: the caller may hand this every frame.
+    store.focusChanged(7, false);
+    try testing.expectEqualStrings("", gw.written.items);
+
+    store.focusChanged(7, true);
+    try testing.expectEqualStrings("\x1b[I", gw.written.items);
+    gw.written.clearRetainingCapacity();
+
+    // Disabling stops the reports without losing track of the state.
+    feedOutput(&store, 7, "\x1b[?1004l");
+    gw.written.clearRetainingCapacity();
+    store.focusChanged(7, false);
+    try testing.expectEqualStrings("", gw.written.items);
+
+    // An unknown pty is a no-op, not a crash.
+    store.focusChanged(999, true);
+}

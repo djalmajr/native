@@ -1949,10 +1949,24 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         fn applyTerminalLayout(self: *Self, runtime: *Runtime, window_id: platform.WindowId, layout: canvas.WidgetLayoutTree, tokens: canvas.DesignTokens) anyerror!void {
             if (comptime !terminal_session.enabled) return;
             var applied = false;
+            // Focus reporting (mode 1004) needs BOTH facts: which widget
+            // holds keyboard focus, and whether this view has it at all.
+            // A pane that stays focused while the window loses focus must
+            // still report CSI O — the child asked about focus, not about
+            // which pane the app prefers.
+            const focus_view: ?*const @TypeOf(runtime.views[0]) = blk: {
+                const index = runtime.findViewIndex(window_id, self.options.canvas_label) orelse break :blk null;
+                break :blk &runtime.views[index];
+            };
             for (layout.nodes) |node| {
                 if (node.widget.kind != .terminal) continue;
                 const pty = node.widget.terminal.pty;
                 if (pty == 0) continue;
+                if (focus_view) |view| {
+                    self.terminal_sessions.focusChanged(pty, view.focused and
+                        view.keyboard_active and
+                        view.canvas_widget_focused_id == node.widget.id);
+                }
                 const frame = node.frame.normalized();
                 if (frame.width <= 0 or frame.height <= 0) continue;
                 // The grid text region sits inside the widget's own
